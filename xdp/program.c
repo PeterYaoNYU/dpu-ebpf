@@ -9,11 +9,18 @@
 
 #define HEARTBEAT_PORT 8888
 
+struct elem {
+	struct bpf_timer t;
+};
+
 BPF_QUEUE(recent_arrival, u64, N);
 
 // idx 0 is for K (the max number re)
 // idx 1 is for EA (estimated arrival time)
 BPF_TABLE("percpu_array", uint32_t, u64, book_keeping, 2);
+
+// for unicast case, set size to 1
+BPF_ARRAY(timers, struct elem, 1);
 
 int myprogram(struct xdp_md *ctx) {
   int ipsize = 0;
