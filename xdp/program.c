@@ -13,7 +13,15 @@ struct elem {
 	struct bpf_timer t;
 };
 
+// struct {
+// 	__uint(type, BPF_MAP_TYPE_ARRAY);
+// 	__uint(max_entries, 2);
+// 	__type(key, int);
+// 	__type(value, struct elem);
+// } timers SEC(".maps");
+
 BPF_QUEUE(recent_arrival, u64, N);
+
 
 // idx 0 is for K (the max number re)
 // idx 1 is for EA (estimated arrival time)
@@ -62,6 +70,8 @@ int myprogram(struct xdp_md *ctx) {
     u64 * ea;
     uint32_t key_to_k = 0;
     uint32_t key_to_ea = 1;
+    uint32_t key_to_timer = 0;
+    struct bpf_timer * timer;
 
     load = data + ipsize + sizeof(struct udphdr);
 
@@ -108,6 +118,13 @@ int myprogram(struct xdp_md *ctx) {
           *ea = *ea + (recv_time - (old_arrival_time))/sequence;
           bpf_trace_printk("new arrival estimate: %ld", *ea);
           book_keeping.update(&key_to_ea, ea);      
+
+          timer = (struct bpf_timer*)timers.lookup(&key_to_timer);
+          if (timer){
+            // struct timers_table_t * timers_ptr = &timers;
+            bpf_trace_printk("the pinter to timers: %ld", &timers);
+            // bpf_timer_init(timer, &timers, CLOCK_REALTIME);
+          }
         }
         book_keeping.update(&key_to_k, &sequence);
       }

@@ -1,0 +1,8 @@
+#### debug log can be found here  
+cat /sys/kernel/debug/tracing/trace_pipe
+
+#### use iproute2 to load the xdp program
+ip link set dev eth0 xdp obj traditional_xdp.o sec xdp
+
+#### unload the xdp program from your nic
+ip link set dev eth0 xdp off
