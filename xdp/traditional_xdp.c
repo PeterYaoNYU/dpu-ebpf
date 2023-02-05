@@ -99,13 +99,13 @@ int myprogram(struct xdp_md *ctx) {
       } else {
         __u64 old_arrival_time;
         bpf_map_pop_elem(&recent_arrival,&old_arrival_time);
-  //       recent_arrival.push(&recv_time, BPF_EXIST);
-  //       ea = (u64*)book_keeping.lookup(&key_to_ea);
+        bpf_map_push_elem(&recent_arrival, &recv_time, BPF_ANY);
+        ea = (__u64*)bpf_map_lookup_elem(&book_keeping, &key_to_ea);
         
-  //       if (ea) {
-  //         *ea = *ea + (recv_time - (old_arrival_time))/sequence;
-  //         bpf_trace_printk("new arrival estimate: %ld", *ea);
-  //         book_keeping.update(&key_to_ea, ea);      
+        if (ea) {
+          *ea = *ea + (recv_time - (old_arrival_time))/sequence;
+          bpf_printk("new arrival estimate: %ld", *ea);
+          bpf_map_update_elem(&book_keeping,&key_to_ea, ea, BPF_ANY);
 
   //         timer = (struct bpf_timer*)timers.lookup(&key_to_timer);
   //         if (timer){
@@ -113,8 +113,8 @@ int myprogram(struct xdp_md *ctx) {
   //           bpf_trace_printk("the pinter to timers: %ld", &timers);
   //           // bpf_timer_init(timer, &timers, CLOCK_REALTIME);
   //         }
-  //       }
-  //       book_keeping.update(&key_to_k, &sequence);
+        }
+        bpf_map_update_elem(&book_keeping, &key_to_k, &sequence, BPF_ANY);
       }
     }
     return XDP_DROP;
