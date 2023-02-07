@@ -6,6 +6,7 @@
 #include <linux/udp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+#include <time.h>
 #define N 5
 #define HEARTBEAT_PORT 8888
 
@@ -26,9 +27,31 @@ struct {
 
 // for unicast case, set size to 1
 // BPF_ARRAY(timer  s, struct elem, 1);
+struct elem {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 2);
+	__type(key, int);
+	__type(value, struct elem);
+} timers SEC(".maps");
+
+__u32 debug = 0;
+
+
+static int timer_cb1(void *map, int *key, struct elem * arrElem) {
+  bpf_printk("suspect that node %d is down", *key);
+  debug++;
+  return 0;
+}
+
 
 __u32 key_to_k = 0;
 __u32 key_to_ea = 1;
+// this needs to be changed in a multicast setting 
+__u32 key_to_timer = 0;
 __u64 zero = 0;
 SEC("xdp")
 int myprogram(struct xdp_md *ctx) {
@@ -66,15 +89,15 @@ int myprogram(struct xdp_md *ctx) {
     __u64 recv_time = bpf_ktime_get_ns();
     // estimated arrival time  
     __u64 * ea;
-    // uint32_t key_to_timer = 0;
 
     load = data + ipsize + sizeof(struct udphdr);
     sequence = bpf_ntohl(*(__u64 *)load);
-    bpf_printk("heartbeat message caught at time: %ld, sequence number: %d", recv_time, sequence);
+    // bpf_printk("heartbeat message caught at time: %ld, sequence number: %d, debug:%d", recv_time, sequence, debug);
 
     __u64 * k_ptr = bpf_map_lookup_elem(&book_keeping, &key_to_k);
     if (k_ptr && sequence > *k_ptr) {
-      if (sequence < N-1) {
+      bpf_printk("heartbeat message caught at time: %ld, sequence number: %d, debug:%d", recv_time, sequence, debug);
+      if (sequence < N) {
         bpf_map_push_elem(&recent_arrival, &recv_time, BPF_EXIST);
         bpf_map_update_elem(&book_keeping, &key_to_k, &sequence, BPF_ANY);
         ea = (__u64*)bpf_map_lookup_elem(&book_keeping, &key_to_ea);
@@ -84,7 +107,8 @@ int myprogram(struct xdp_md *ctx) {
         } else {
           bpf_printk("failed to get ea from map");
         }
-      } else if (sequence == N-1) {
+      } else if (sequence == N) {
+        struct elem * heartbeat_timer;
         ea = 0;
         ea = (__u64*)bpf_map_lookup_elem(&book_keeping, &key_to_ea);
         if (ea) {
@@ -96,23 +120,38 @@ int myprogram(struct xdp_md *ctx) {
         }
         bpf_map_push_elem(&recent_arrival, &recv_time, BPF_EXIST);
         bpf_map_update_elem(&book_keeping, &key_to_k, &sequence, BPF_ANY);
+
+        heartbeat_timer = (struct elem*)bpf_map_lookup_elem(&timers, &key_to_timer);
+        if (heartbeat_timer && ea){
+          bpf_printk("timer ready");
+          bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC);
+          bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1);
+          bpf_timer_start(&heartbeat_timer->timer, 1, 0);
+        } else {
+          bpf_printk("cannot locate the timer from the array");
+        }
       } else {
         __u64 old_arrival_time;
+        struct elem * heartbeat_timer;
         bpf_map_pop_elem(&recent_arrival,&old_arrival_time);
         bpf_map_push_elem(&recent_arrival, &recv_time, BPF_ANY);
         ea = (__u64*)bpf_map_lookup_elem(&book_keeping, &key_to_ea);
         
         if (ea) {
-          *ea = *ea + (recv_time - (old_arrival_time))/sequence;
+          *ea = *ea + (recv_time - (old_arrival_time))/N;
           bpf_printk("new arrival estimate: %ld", *ea);
           bpf_map_update_elem(&book_keeping,&key_to_ea, ea, BPF_ANY);
 
-  //         timer = (struct bpf_timer*)timers.lookup(&key_to_timer);
-  //         if (timer){
-  //           // struct timers_table_t * timers_ptr = &timers;
-  //           bpf_trace_printk("the pinter to timers: %ld", &timers);
-  //           // bpf_timer_init(timer, &timers, CLOCK_REALTIME);
-  //         }
+          struct elem * heartbeat_timer = (struct elem*)bpf_map_lookup_elem(&timers, &key_to_timer);
+          if (heartbeat_timer && ea){
+            bpf_printk("timer ready");
+            bpf_timer_cancel(&(heartbeat_timer->timer));
+            // bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC);
+            // bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1);
+            bpf_timer_start(&(heartbeat_timer->timer), 1, 0);
+          } else {
+            bpf_printk("fail to find the timer from the map");
+          }
         }
         bpf_map_update_elem(&book_keeping, &key_to_k, &sequence, BPF_ANY);
       }
