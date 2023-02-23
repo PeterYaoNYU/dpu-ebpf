@@ -4,5 +4,8 @@ all: traditional_xdp.c
 test: timer_test.c 
 	clang -target bpf -c timer_test.c -o timer_test.o -g -O2
 
+client: client.c 
+	gcc -o client -g -Wall client.c -pg
+
 clean:
-	rm -f traditional_xdp.o 
+	rm -f traditional_xdp.o

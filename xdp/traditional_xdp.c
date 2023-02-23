@@ -7,6 +7,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include <time.h>
+#include <errno.h>
 #define N 5
 #define HEARTBEAT_PORT 8888
 #define DELTA 1000000000
@@ -41,26 +42,11 @@ struct {
   __uint(pinning, LIBBPF_PIN_BY_NAME);
 } timers SEC(".maps");
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 2);
-	__type(key, __u32);
-	__type(value, __u32);
-} debug_arr SEC(".maps");
-
-
-__u32 * debug;
-__u32 key_to_debug = 0;
+// __u32 * debug;
+// __u32 key_to_debug = 0;
 
 static int timer_cb1(void *map, int *key, struct elem * arrElem) {
   bpf_printk("suspect that node %d is down", *key);
-  // debug = (__u32*)bpf_map_lookup_elem(&debug_arr, &key_to_debug);
-  // if (debug) {
-  //   bpf_printk("debug was %d", *debug);
-  //   *debug = *debug + 1;
-  //   bpf_map_update_elem(&debug_arr, &key_to_debug, debug, BPF_ANY);
-  //   bpf_printk("timer callback done, debug is %d", *debug);
-  // }
   return 0;
 }
 
@@ -106,7 +92,8 @@ int myprogram(struct xdp_md *ctx) {
   if (udp->dest == bpf_htons(HEARTBEAT_PORT)){
     __u64 recv_time = bpf_ktime_get_ns();
     // estimated arrival time  
-    __u64* ea;
+    __u64 ea_val = 0;
+    __u64 * ea = &ea_val;
     struct elem * heartbeat_timer;
 
     load = data + ipsize + sizeof(struct udphdr);
@@ -114,11 +101,10 @@ int myprogram(struct xdp_md *ctx) {
     // bpf_printk("heartbeat message caught at time: %ld, sequence number: %d, debug:%d", recv_time, sequence, debug);
 
     __u64 * k_ptr = (__u64 * )bpf_map_lookup_elem(&book_keeping, &key_to_k);
-    debug = (__u32*)bpf_map_lookup_elem(&debug_arr, &key_to_debug);
-    if (k_ptr && debug && sequence >= *k_ptr) {
+    if (k_ptr && sequence >= *k_ptr) {
       __u64* u;
 
-      bpf_printk("heartbeat message caught at time: %ld, sequence number: %d, debug:%d", recv_time, sequence, *debug);
+      bpf_printk("heartbeat message caught at time: %ld, sequence number: %d", recv_time, sequence);
       if (sequence == 0) {
         bpf_map_push_elem(&recent_arrival, &recv_time, BPF_EXIST);
         bpf_map_update_elem(&book_keeping, &key_to_u, &recv_time, BPF_ANY);
@@ -129,19 +115,19 @@ int myprogram(struct xdp_md *ctx) {
         heartbeat_timer = (struct elem*)bpf_map_lookup_elem(&timers, &key_to_timer);
         if (heartbeat_timer){
           // this line of code is questionable, given that sequence is an unsigned long
-          bpf_printk("debugging");
           bpf_printk("recv_time for sequence 0: %ld", recv_time);
           *ea = recv_time + ((sequence+1)* DELTA)/2;
           bpf_printk("new arrival estimate: %ld, recv_time: %ld", *ea, recv_time);
-          bpf_printk("debugging");
-          int ret = bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC);
-          if (ret != 0){
-            bpf_printk("error when init timers!!!");
+          if (bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC) == -EPERM){
+            bpf_printk("timer init error");
           }
-          bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1);
-          // bpf_timer_start(&(heartbeat_timer->timer), *ea - recv_time, 0);
-          bpf_timer_start(&(heartbeat_timer->timer), 1, 0);
-
+          if (bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1) != 0){
+            bpf_printk("set callback erro");
+          }
+          if (bpf_timer_start(&(heartbeat_timer->timer), *ea - recv_time, 0) != 0){
+            bpf_printk("timer start error");
+          }
+          bpf_printk("timer set for seq = 0");
         }
       }else if (sequence < N) {
         __u64 * u;
@@ -159,10 +145,26 @@ int myprogram(struct xdp_md *ctx) {
           bpf_printk("new arrival estimate: %ld", *ea);
           bpf_map_update_elem(&book_keeping, &key_to_u, u, BPF_ANY);
           bpf_map_update_elem(&book_keeping, &key_to_ea, ea, BPF_ANY);
-          bpf_timer_cancel(&(heartbeat_timer->timer));
-          // bpf_timer_start(&(heartbeat_timer->timer), *ea - recv_time, 0);
-          bpf_timer_start(&(heartbeat_timer->timer), 1, 0);
-
+          int ret;
+          ret = bpf_timer_cancel(&(heartbeat_timer->timer));
+          if (ret==0){
+            bpf_printk("cancelling a timer that is not active");
+          } else if (ret ==1 ){
+            bpf_printk("cancelling an active timer");
+          } else {
+            bpf_printk("error occurred while cancelling a timer");
+          }
+          if (bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC) == -EPERM){
+            bpf_printk("timer init error");
+          }
+          if (bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1) != 0){
+            bpf_printk("set callback erro");
+          }
+          if (bpf_timer_start(&(heartbeat_timer->timer), *ea - recv_time, 0) != 0){
+            bpf_printk("error occurred while starting the timer");
+          } else {
+            bpf_printk("timer started success for seq = %d", sequence);
+          }
         } else {
           bpf_printk("failed to get needed resources from map");
         }
@@ -178,12 +180,26 @@ int myprogram(struct xdp_md *ctx) {
           bpf_map_update_elem(&book_keeping,&key_to_ea, ea, BPF_ANY);
           struct elem * heartbeat_timer = (struct elem*)bpf_map_lookup_elem(&timers, &key_to_timer);
           if (heartbeat_timer && ea){
-            bpf_printk("timer ready");
-            bpf_timer_cancel(&(heartbeat_timer->timer));
-            // bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC);
-            // bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1);
-            // bpf_timer_start(&(heartbeat_timer->timer), *ea - recv_time, 0);
-            bpf_timer_start(&(heartbeat_timer->timer), 1, 0);
+            int ret;
+            ret = bpf_timer_cancel(&(heartbeat_timer->timer));
+            if (ret==0){
+              bpf_printk("cancelling a timer that is not active");
+            } else if (ret ==1 ){
+              bpf_printk("cancelling an active timer");
+            } else {
+              bpf_printk("error occurred while cancelling a timer");
+            }
+            if (bpf_timer_init(&(heartbeat_timer->timer), &timers, CLOCK_MONOTONIC) == -EPERM){
+              bpf_printk("timer init error");
+            }
+            if (bpf_timer_set_callback(&(heartbeat_timer->timer), timer_cb1) != 0){
+              bpf_printk("set callback erro");
+            }
+            if (bpf_timer_start(&(heartbeat_timer->timer), *ea - recv_time, 0) != 0){
+              bpf_printk("error occurred while starting the timer");
+            } else {
+              bpf_printk("timer started success for seq = %d", sequence);
+            }
           } else {
             bpf_printk("fail to find the timer from the map");
           }
@@ -195,5 +211,4 @@ int myprogram(struct xdp_md *ctx) {
   }
   return XDP_PASS;
 }
-
 char _license[] SEC("license") = "GPL";
